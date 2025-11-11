@@ -3,6 +3,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use arcium_anchor::prelude::*;
+use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
 
 const COMP_DEF_OFFSET_PROCESS_BET: u32 = comp_def_offset("process_bet");
 const COMP_DEF_OFFSET_CALCULATE_REWARD: u32 = comp_def_offset("calculate_reward");
@@ -105,7 +106,15 @@ pub mod swiv_privacy {
 
     /// Initialize computation definition for process_bet
     pub fn init_process_bet_comp_def(ctx: Context<InitProcessBetCompDef>) -> Result<()> {
-        init_comp_def(ctx.accounts, 0, None, None)?;
+        init_comp_def(
+          ctx.accounts,
+          0,
+          Some(CircuitSource::OffChain(OffChainCircuitSource {
+            source: "https://bvcykkwsaifzcwtuhhrt.supabase.co/storage/v1/object/public/arcium/process_bet.arcis".to_string(),
+            hash: [0; 32], 
+          })),
+          None,
+        )?;
         Ok(())
     }
 
@@ -231,7 +240,15 @@ pub mod swiv_privacy {
 
     /// Initialize computation definition for calculate_reward
     pub fn init_calculate_reward_comp_def(ctx: Context<InitCalculateRewardCompDef>) -> Result<()> {
-        init_comp_def(ctx.accounts, 0, None, None)?;
+        init_comp_def(
+          ctx.accounts,
+          0,
+          Some(CircuitSource::OffChain(OffChainCircuitSource {
+            source: "https://bvcykkwsaifzcwtuhhrt.supabase.co/storage/v1/object/public/arcium/calculate_reward.arcis".to_string(),
+            hash: [0; 32], 
+          })),
+          None,
+        )?;
         Ok(())
     }
 
@@ -362,7 +379,7 @@ pub struct Pool {
 }
 
 impl Pool {
-    pub const LEN: usize = 8 + 8 + 32 + (4 + 10) + 8 + 8 + 4 + 4 + 8 + 1 + 8 + 1 + 1 + 16;
+    pub const LEN: usize = 8 + 8 + 32 + (4 + 10) + 8 + 8 + 4 + 4 + 8 + 1 + 8 + 1 + 1;
 }
 
 #[account]
@@ -378,7 +395,7 @@ pub struct EncryptedBet {
 }
 
 impl EncryptedBet {
-    pub const LEN: usize = 8 + 32 + 32 + 32 + 32 + 16 + 8 + 1 + 1 + 16;
+    pub const LEN: usize = 8 + 32 + 32 + 32 + 32 + 16 + 8 + 1 + 1;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
@@ -514,7 +531,7 @@ pub struct InitProcessBetCompDef<'info> {
         mut,
         address = derive_mxe_pda!()
     )]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    pub mxe_account: Account<'info, MXEAccount>,
     #[account(mut)]
     /// CHECK: comp_def_account, checked by arcium program
     pub comp_def_account: UncheckedAccount<'info>,
@@ -569,7 +586,7 @@ pub struct PlaceEncryptedBet<'info> {
     #[account(
         address = derive_mxe_pda!()
     )]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    pub mxe_account: Account<'info, MXEAccount>,
     #[account(
         mut,
         address = derive_mempool_pda!()
@@ -634,7 +651,7 @@ pub struct InitCalculateRewardCompDef<'info> {
         mut,
         address = derive_mxe_pda!()
     )]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    pub mxe_account: Account<'info, MXEAccount>,
     #[account(mut)]
     /// CHECK: comp_def_account, checked by arcium program
     pub comp_def_account: UncheckedAccount<'info>,
