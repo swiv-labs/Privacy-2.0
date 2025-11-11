@@ -8,7 +8,7 @@ use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
 const COMP_DEF_OFFSET_PROCESS_BET: u32 = comp_def_offset("process_bet");
 const COMP_DEF_OFFSET_CALCULATE_REWARD: u32 = comp_def_offset("calculate_reward");
 
-declare_id!("8dhs7TKvik7axR5j3BU1K8YMDk3qiJfRQj8yxWjqK4H6");
+declare_id!("8D6DiY4fWkyJ2QicNacEJFoA4cNaCfbs9r215oGLxW73");
 
 #[arcium_program]
 pub mod swiv_privacy {
