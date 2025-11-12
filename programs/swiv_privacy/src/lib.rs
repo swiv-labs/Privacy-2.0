@@ -258,23 +258,22 @@ pub mod swiv_privacy {
         let bet = &ctx.accounts.bet;
 
         require!(
-            pool.status == PoolStatus::Finalized,
-            ErrorCode::PoolNotFinalized
+          pool.status == PoolStatus::Finalized,
+          ErrorCode::PoolNotFinalized
         );
         require!(!bet.claimed, ErrorCode::AlreadyClaimed);
         require!(bet.user == ctx.accounts.user.key(), ErrorCode::Unauthorized);
 
-        // Set sign PDA bump
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        // Build arguments for reward calculation
+        // FIXED: Pass encrypted price as EncryptedU8, others as plaintext
         let args = vec![
             Argument::ArcisPubkey(bet.pub_key),
             Argument::PlaintextU128(bet.nonce),
-            Argument::EncryptedU8(bet.encrypted_predicted_price),
-            Argument::PlaintextU64(pool.actual_price),
-            Argument::PlaintextU64(pool.total_pool_amount),
-            Argument::PlaintextU16(ctx.accounts.protocol_state.protocol_fee_bps),
+            Argument::EncryptedU8(bet.encrypted_predicted_price),  // Encrypted
+            Argument::PlaintextU64(pool.actual_price),              // Plaintext
+            Argument::PlaintextU64(pool.total_pool_amount),         // Plaintext
+            Argument::PlaintextU16(ctx.accounts.protocol_state.protocol_fee_bps), // Plaintext
         ];
 
         queue_computation(
