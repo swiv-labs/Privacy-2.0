@@ -6,7 +6,7 @@ use arcium_anchor::prelude::*;
 use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
 
 const COMP_DEF_OFFSET_PROCESS_BET: u32 = comp_def_offset("process_bet");
-const COMP_DEF_OFFSET_CALCULATE_REWARD: u32 = comp_def_offset("calculate_reward");
+const COMP_DEF_OFFSET_CALCULATE_REWARD: u32 = comp_def_offset("calculate_reward_v2");
 
 declare_id!("8D6DiY4fWkyJ2QicNacEJFoA4cNaCfbs9r215oGLxW73");
 
