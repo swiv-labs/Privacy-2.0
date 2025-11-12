@@ -667,19 +667,19 @@ pub struct CalculateReward<'info> {
         seeds = [b"protocol_state"],
         bump = protocol_state.bump,
     )]
-    pub protocol_state: Account<'info, ProtocolState>,
+    pub protocol_state: Box<Account<'info, ProtocolState>>,
 
     #[account(
         seeds = [b"pool", pool.pool_id.to_le_bytes().as_ref()],
         bump = pool.bump,
     )]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
 
     #[account(
         seeds = [b"bet", pool.key().as_ref(), user.key().as_ref()],
         bump = bet.bump,
     )]
-    pub bet: Account<'info, EncryptedBet>,
+    pub bet: Box<Account<'info, EncryptedBet>>,
 
     pub user: Signer<'info>,
 
