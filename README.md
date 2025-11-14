@@ -39,7 +39,7 @@ swiv_privacy/
 │       └── src/
 │           └── lib.rs             # Main program with Arcium integration
 ├── encrypted-ixs/                 # Confidential instructions
-│   └── bet_processing.rs          # MPC computation logic
+│   └── lib.rs                    # MPC computation logic for bet processing and reward calculation
 └── client/
     └── encryption.ts              # TypeScript encryption helpers
 ```
