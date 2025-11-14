@@ -196,9 +196,7 @@ pub fn calculate_reward(ctx: Context<CalculateReward>)
 These run in Arcium's MPC environment:
 
 - **`process_encrypted_bet`**: Validates encrypted predictions
-- **`calculate_encrypted_reward`**: Computes rewards on encrypted data
-- **`aggregate_predictions`**: Calculate statistics without revealing individual values
-- **`compare_predictions`**: Rank predictions privately
+- **`calculate_encrypted_reward`**: Computes and calculates rewards on encrypted data
 
 ### 2. Modified Account Structure
 
@@ -234,104 +232,11 @@ Client                  Solana Program              Arcium MPC Network
   | <-- Confirmation ----    |                            |
 ```
 
-## Security Considerations
-
-### What's Private
-- ✅ Individual predicted prices
-- ✅ Prediction accuracy before finalization
-- ✅ Individual reward amounts (optional)
-
-### What's Public
-- ⚠️ Pool total amount
-- ⚠️ Number of participants
-- ⚠️ Entry fees
-- ⚠️ Final actual price
-- ⚠️ User participation (addresses visible on-chain)
-
-### Encryption Details
-- Uses NaCl (TweetNaCl) for client-side encryption
-- Arcium MPC nodes process without learning plaintext
-- Threshold cryptography ensures no single node can decrypt
-- Computations verified on-chain via Solana
-
 ## Testing
 
 ```bash
 # Run tests
 arcium test
-
-# Test encrypted instructions
-arcium test --encrypted-only
-```
-
-Example test:
-
-```typescript
-it('Places encrypted bet', async () => {
-  const predictedPrice = 50000;
-  
-  const { encryptedData, publicKey, nonce } = 
-    await encryption.encryptBetData(predictedPrice, user);
-  
-  await program.methods
-    .placeEncryptedBet(encryptedData, publicKey, nonce)
-    .accounts({...})
-    .rpc();
-  
-  const bet = await program.account.encryptedBet.fetch(betAccount);
-  assert(bet.encrypted_data !== null);
-  // Predicted price should NOT be readable
-});
-```
-
-## Migration from Original Code
-
-### Step 1: Replace Bet Account
-```rust
-// OLD
-#[account]
-pub struct Bet {
-    pub predicted_price: u64,  // Plaintext!
-    // ...
-}
-
-// NEW
-#[account]
-pub struct EncryptedBet {
-    pub encrypted_data: [u8; 32],  // Encrypted!
-    // ...
-}
-```
-
-### Step 2: Update Instructions
-```rust
-// OLD
-pub fn place_bet(ctx: Context<PlaceBet>, predicted_price: u64)
-
-// NEW
-pub fn place_encrypted_bet(
-    ctx: Context<PlaceEncryptedBet>,
-    encrypted_bet_data: [u8; 32],
-    // ...
-)
-```
-
-### Step 3: Add MPC Computation
-```rust
-// Add confidential computation call
-arcium_client::invoke_computation(
-    &ctx.accounts.comp_def,
-    &ctx.accounts.computation,
-    // ...
-)?;
-```
-
-## Limitations & Trade-offs
-
-1. **Performance**: MPC adds latency (typically 2-5 seconds per computation)
-2. **Cost**: MPC computations incur additional fees
-3. **Complexity**: More complex client-side encryption logic
-4. **Testnet Only**: Currently on Arcium Public Testnet
 
 ## Benefits
 
@@ -339,43 +244,3 @@ arcium_client::invoke_computation(
 2. **Fair Competition**: No front-running based on visible predictions
 3. **Regulatory Compliance**: Better privacy for sensitive financial data
 4. **User Trust**: Users can verify MPC computation integrity
-
-## Resources
-
-- [Arcium Documentation](https://docs.arcium.com)
-- [Arcium Discord](https://discord.com/invite/arcium)
-- [TypeScript SDK](https://ts.arcium.com/api)
-- [Example Programs](https://github.com/arcium-network/examples)
-
-## Troubleshooting
-
-### Build Errors
-```bash
-# Clear cache
-arcium clean
-arcium build
-```
-
-### Encryption Issues
-- Ensure nonce is 16 bytes
-- Verify public key format (32 bytes)
-- Check ciphertext padding (32 bytes)
-
-### Computation Timeouts
-- MPC computations can take 2-5 seconds
-- Implement proper retry logic
-- Monitor computation status on-chain
-
-## Next Steps
-
-1. Test on Arcium Testnet
-2. Implement additional privacy features
-3. Optimize MPC computation costs
-4. Add privacy-preserving analytics
-5. Deploy to mainnet when Arcium launches
-
-## Support
-
-- Discord: [Arcium Community](https://discord.com/invite/arcium)
-- Docs: https://docs.arcium.com
-- GitHub: https://github.com/arcium-network
