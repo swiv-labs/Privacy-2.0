@@ -75,11 +75,11 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anchor-lang = "0.29.0"
-anchor-spl = "0.29.0"
-arcium-macros = "0.1.0"
-arcium-client = "0.1.0"
-arcis-imports = "0.1.0"
+anchor-lang = "0.32.1"
+anchor-spl = "0.32.1"
+arcium-macros = "0.4.0"
+arcium-client = "0.4.0"
+arcis-imports = "0.4.0"
 ```
 
 ### 4. Build the Program
