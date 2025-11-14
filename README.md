@@ -237,6 +237,7 @@ Client                  Solana Program              Arcium MPC Network
 ```bash
 # Run tests
 arcium test
+```
 
 ## Benefits
 
