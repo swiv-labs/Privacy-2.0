@@ -16,7 +16,7 @@ mod circuits {
     }
 
     #[instruction]
-    pub fn calculate_reward(
+    pub fn calculate_reward_v2(
         encrypted_price_ctxt: Enc<Shared, u64>,
         actual_price: u64,
         total_pool_amount: u64,

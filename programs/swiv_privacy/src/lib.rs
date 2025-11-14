@@ -281,7 +281,7 @@ pub mod swiv_privacy {
             computation_offset,
             args,
             None,
-            vec![CalculateRewardCallback::callback_ix(&[])],
+            vec![CalculateRewardV2Callback::callback_ix(&[])],
             1,
         )?;
 
@@ -289,13 +289,13 @@ pub mod swiv_privacy {
     }
 
     /// Callback for reward calculation - distributes the reward
-    #[arcium_callback(encrypted_ix = "calculate_reward")]
-    pub fn calculate_reward_callback(
-        ctx: Context<CalculateRewardCallback>,
-        output: ComputationOutputs<CalculateRewardOutput>,
+    #[arcium_callback(encrypted_ix = "calculate_reward_v2")]
+    pub fn calculate_reward_v2_callback(
+        ctx: Context<CalculateRewardV2Callback>,
+        output: ComputationOutputs<CalculateRewardV2Output>,
     ) -> Result<()> {
         let _packed_result = match output {
-            ComputationOutputs::Success(CalculateRewardOutput { field_0 }) => field_0,
+            ComputationOutputs::Success(CalculateRewardV2Output { field_0 }) => field_0,
             _ => return Err(ErrorCode::AbortedComputation.into()),
         };
 
@@ -306,6 +306,8 @@ pub mod swiv_privacy {
         let bet = &mut ctx.accounts.bet;
 
         bet.claimed = true;
+
+        msg!("=== reward_amount === {}", reward_amount);
 
         if reward_amount > 0 {
             let pool_id = pool.pool_id;
@@ -641,7 +643,7 @@ pub struct ProcessBetCallback<'info> {
     pub instructions_sysvar: AccountInfo<'info>,
 }
 
-#[init_computation_definition_accounts("calculate_reward", payer)]
+#[init_computation_definition_accounts("calculate_reward_v2", payer)]
 #[derive(Accounts)]
 pub struct InitCalculateRewardCompDef<'info> {
     #[account(mut)]
@@ -658,7 +660,7 @@ pub struct InitCalculateRewardCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[queue_computation_accounts("calculate_reward", payer)]
+#[queue_computation_accounts("calculate_reward_v2", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
 pub struct CalculateReward<'info> {
@@ -738,9 +740,9 @@ pub struct CalculateReward<'info> {
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("calculate_reward")]
+#[callback_accounts("calculate_reward_v2")]
 #[derive(Accounts)]
-pub struct CalculateRewardCallback<'info> {
+pub struct CalculateRewardV2Callback<'info> {
     #[account(
         seeds = [b"protocol_state"],
         bump = protocol_state.bump,
