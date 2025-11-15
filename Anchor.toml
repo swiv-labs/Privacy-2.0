@@ -12,7 +12,7 @@ swiv_privacy = "8D6DiY4fWkyJ2QicNacEJFoA4cNaCfbs9r215oGLxW73"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "https://devnet.helius-rpc.com/?api-key=6dbe7d1c-6aa3-48f4-94ab-c79ad7c1e0f2"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

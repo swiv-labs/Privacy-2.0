@@ -277,7 +277,6 @@ pub mod swiv_privacy {
         Argument::PlaintextU16(ctx.accounts.protocol_state.protocol_fee_bps),
     ];
 
-    // Pass ALL accounts needed by the callback
     queue_computation(
         ctx.accounts,
         computation_offset,
