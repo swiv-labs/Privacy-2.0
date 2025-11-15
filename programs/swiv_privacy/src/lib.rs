@@ -708,12 +708,13 @@ pub struct CalculateReward<'info> {
     )]
     pub pool: Box<Account<'info, Pool>>,
 
+    /// CHECK: Token account owned by Token program, passed to callback
     #[account(
         mut,
         seeds = [b"pool_vault", pool.pool_id.to_le_bytes().as_ref()],
         bump = pool.vault_bump,
     )]
-    pub pool_vault: Box<Account<'info, TokenAccount>>,
+    pub pool_vault: UncheckedAccount<'info>,
 
     #[account(
         mut,
@@ -722,8 +723,9 @@ pub struct CalculateReward<'info> {
     )]
     pub bet: Box<Account<'info, EncryptedBet>>,
 
+    /// CHECK: Token account owned by Token program, passed to callback
     #[account(mut)]
-    pub user_token_account: Box<Account<'info, TokenAccount>>,
+    pub user_token_account: UncheckedAccount<'info>,
 
     pub user: Signer<'info>,
 
@@ -779,7 +781,6 @@ pub struct CalculateReward<'info> {
     )]
     pub clock_account: Account<'info, ClockAccount>,
 
-    // ADD THIS ↓
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
