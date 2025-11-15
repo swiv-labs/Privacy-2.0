@@ -8,6 +8,11 @@ mod circuits {
         predicted_price: u64,
     }
 
+    pub struct RewardOutput {
+        reward_amount: u64,
+        accuracy_bps: u64,
+    }
+
     #[instruction]
     pub fn process_bet(input_ctxt: Enc<Shared, BetInput>) -> Enc<Shared, bool> {
         let input = input_ctxt.to_arcis();
@@ -21,7 +26,7 @@ mod circuits {
         actual_price: u64,
         total_pool_amount: u64,
         protocol_fee_bps: u16,
-    ) -> Enc<Shared, u64> {
+    ) -> RewardOutput {
         let predicted = encrypted_price_ctxt.to_arcis() as i128;
         let actual = actual_price as i128;
 
@@ -38,8 +43,7 @@ mod circuits {
             10000 - ratio
         };
 
-        let protocol_fee =
-            (total_pool_amount as u128 * protocol_fee_bps as u128) / 10000;
+        let protocol_fee = (total_pool_amount as u128 * protocol_fee_bps as u128) / 10000;
         let distributable = (total_pool_amount as u128) - protocol_fee;
 
         let reward_amount = if accuracy_bps == 0 {
@@ -49,8 +53,11 @@ mod circuits {
             reward as u64
         };
 
-        let packed = (reward_amount as u128 * 4_294_967_296u128) + (accuracy_bps as u128);
-        let packed_u64 = packed as u64;
-        encrypted_price_ctxt.owner.from_arcis(packed_u64)
+        let output = RewardOutput {
+            reward_amount,
+            accuracy_bps,
+        };
+        
+        output.reveal()
     }
 }

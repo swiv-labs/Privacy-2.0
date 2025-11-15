@@ -244,7 +244,7 @@ pub mod swiv_privacy {
           ctx.accounts,
           0,
           Some(CircuitSource::OffChain(OffChainCircuitSource {
-            source: "https://bvcykkwsaifzcwtuhhrt.supabase.co/storage/v1/object/public/arcium/calculate_reward.arcis".to_string(),
+            source: "https://bvcykkwsaifzcwtuhhrt.supabase.co/storage/v1/object/public/arcium/calculate_reward_v2.arcis".to_string(),
             hash: [0; 32], 
           })),
           None,
@@ -294,13 +294,13 @@ pub mod swiv_privacy {
         ctx: Context<CalculateRewardV2Callback>,
         output: ComputationOutputs<CalculateRewardV2Output>,
     ) -> Result<()> {
-        let _packed_result = match output {
+        let result = match output {
             ComputationOutputs::Success(CalculateRewardV2Output { field_0 }) => field_0,
             _ => return Err(ErrorCode::AbortedComputation.into()),
         };
 
-        let reward_amount = 0u64;
-        let accuracy_bps = 0u64;
+        let reward_amount = result.field_0; 
+        let accuracy_bps = result.field_1;   
 
         let pool = &ctx.accounts.pool;
         let bet = &mut ctx.accounts.bet;
@@ -308,6 +308,7 @@ pub mod swiv_privacy {
         bet.claimed = true;
 
         msg!("=== reward_amount === {}", reward_amount);
+        msg!("=== accuracy_bps === {}", accuracy_bps);
 
         if reward_amount > 0 {
             let pool_id = pool.pool_id;
