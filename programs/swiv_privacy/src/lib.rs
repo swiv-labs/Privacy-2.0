@@ -12,6 +12,8 @@ declare_id!("8D6DiY4fWkyJ2QicNacEJFoA4cNaCfbs9r215oGLxW73");
 
 #[arcium_program]
 pub mod swiv_privacy {
+    use arcium_client::idl::arcium::types::CallbackAccount;
+
     use super::*;
 
     /// Initialize the protocol state
@@ -254,39 +256,64 @@ pub mod swiv_privacy {
 
     /// Calculate reward using encrypted computation
     pub fn calculate_reward(ctx: Context<CalculateReward>, computation_offset: u64) -> Result<()> {
-        let pool = &ctx.accounts.pool;
-        let bet = &ctx.accounts.bet;
+    let pool = &ctx.accounts.pool;
+    let bet = &ctx.accounts.bet;
 
-        require!(
-          pool.status == PoolStatus::Finalized,
-          ErrorCode::PoolNotFinalized
-        );
-        require!(!bet.claimed, ErrorCode::AlreadyClaimed);
-        require!(bet.user == ctx.accounts.user.key(), ErrorCode::Unauthorized);
+    require!(
+        pool.status == PoolStatus::Finalized,
+        ErrorCode::PoolNotFinalized
+    );
+    require!(!bet.claimed, ErrorCode::AlreadyClaimed);
+    require!(bet.user == ctx.accounts.user.key(), ErrorCode::Unauthorized);
 
-        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
-        // FIXED: Pass encrypted price as EncryptedU8, others as plaintext
-        let args = vec![
-            Argument::ArcisPubkey(bet.pub_key),
-            Argument::PlaintextU128(bet.nonce),
-            Argument::EncryptedU8(bet.encrypted_predicted_price),  // Encrypted
-            Argument::PlaintextU64(pool.actual_price),              // Plaintext
-            Argument::PlaintextU64(pool.total_pool_amount),         // Plaintext
-            Argument::PlaintextU16(ctx.accounts.protocol_state.protocol_fee_bps), // Plaintext
-        ];
+    let args = vec![
+        Argument::ArcisPubkey(bet.pub_key),
+        Argument::PlaintextU128(bet.nonce),
+        Argument::EncryptedU8(bet.encrypted_predicted_price),  
+        Argument::PlaintextU64(pool.actual_price),              
+        Argument::PlaintextU64(pool.total_pool_amount),         
+        Argument::PlaintextU16(ctx.accounts.protocol_state.protocol_fee_bps),
+    ];
 
-        queue_computation(
-            ctx.accounts,
-            computation_offset,
-            args,
-            None,
-            vec![CalculateRewardV2Callback::callback_ix(&[])],
-            1,
-        )?;
+    // Pass ALL accounts needed by the callback
+    queue_computation(
+        ctx.accounts,
+        computation_offset,
+        args,
+        None,
+        vec![CalculateRewardV2Callback::callback_ix(&[
+            CallbackAccount {
+                pubkey: ctx.accounts.protocol_state.key(),
+                is_writable: false,
+            },
+            CallbackAccount {
+                pubkey: ctx.accounts.pool.key(),
+                is_writable: false,
+            },
+            CallbackAccount {
+                pubkey: ctx.accounts.pool_vault.key(),
+                is_writable: true,
+            },
+            CallbackAccount {
+                pubkey: ctx.accounts.bet.key(),
+                is_writable: true,
+            },
+            CallbackAccount {
+                pubkey: ctx.accounts.user_token_account.key(),
+                is_writable: true,
+            },
+            CallbackAccount {
+                pubkey: ctx.accounts.user.key(),
+                is_writable: false,
+            },
+        ])],
+        1,
+    )?;
 
-        Ok(())
-    }
+    Ok(())
+}
 
     /// Callback for reward calculation - distributes the reward
     #[arcium_callback(encrypted_ix = "calculate_reward_v2")]
@@ -294,10 +321,15 @@ pub mod swiv_privacy {
         ctx: Context<CalculateRewardV2Callback>,
         output: ComputationOutputs<CalculateRewardV2Output>,
     ) -> Result<()> {
+        msg!("=== calc reward call back start === ");
         let result = match output {
             ComputationOutputs::Success(CalculateRewardV2Output { field_0 }) => field_0,
             _ => return Err(ErrorCode::AbortedComputation.into()),
         };
+
+
+        msg!("=== calc reward call back reward_amount === {}", result.field_0);
+        msg!("=== calc reward call back accuracy_bps === {}", result.field_1);
 
         let reward_amount = result.field_0; 
         let accuracy_bps = result.field_1;   
@@ -678,10 +710,21 @@ pub struct CalculateReward<'info> {
     pub pool: Box<Account<'info, Pool>>,
 
     #[account(
+        mut,
+        seeds = [b"pool_vault", pool.pool_id.to_le_bytes().as_ref()],
+        bump = pool.vault_bump,
+    )]
+    pub pool_vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        mut,
         seeds = [b"bet", pool.key().as_ref(), user.key().as_ref()],
         bump = bet.bump,
     )]
     pub bet: Box<Account<'info, EncryptedBet>>,
+
+    #[account(mut)]
+    pub user_token_account: Box<Account<'info, TokenAccount>>,
 
     pub user: Signer<'info>,
 
@@ -737,6 +780,8 @@ pub struct CalculateReward<'info> {
     )]
     pub clock_account: Account<'info, ClockAccount>,
 
+    // ADD THIS ↓
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
 }
