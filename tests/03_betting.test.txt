@@ -1,0 +1,130 @@
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
+import { SwivPrivacy } from "../target/types/swiv_privacy";
+import { assert } from "chai";
+import { 
+  getPoolPDA, 
+  getPoolVaultPDA, 
+  getBetPDA, 
+  getArciumContext
+} from "./utils";
+import { getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
+
+describe("03_betting", () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+  const program = anchor.workspace.SwivPrivacy as Program<SwivPrivacy>;
+
+  let usdcMint: anchor.web3.PublicKey;
+  let user1 = anchor.web3.Keypair.generate();
+  let user1ATA: anchor.web3.PublicKey;
+  
+  // Use unique ID to prevent state collision
+  const poolId = new anchor.BN(Date.now()); 
+
+  const arciumFeePool = new anchor.web3.PublicKey("BSC6rWJ9ucqZ6rcM3knfpgdRwCyJ7Q9KsddjeSL4EdHq"); 
+  const arciumClock = new anchor.web3.PublicKey("EQr6UCd7eyRjpuRsNK6a8WxkgrpSGctKMFuz92FRRh63"); 
+
+  before(async () => {
+    const payer = (provider.wallet as any).payer;
+    const { createMint } = require("@solana/spl-token");
+    usdcMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
+
+    // Fund User
+    const transferTx = new anchor.web3.Transaction().add(
+        anchor.web3.SystemProgram.transfer({
+            fromPubkey: payer.publicKey,
+            toPubkey: user1.publicKey,
+            lamports: 0.05 * anchor.web3.LAMPORTS_PER_SOL,
+        })
+    );
+    await provider.sendAndConfirm(transferTx);
+
+    user1ATA = (await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      usdcMint,
+      user1.publicKey
+    )).address;
+
+    await mintTo(provider.connection, payer, usdcMint, user1ATA, payer, 10_000_000); 
+
+    // Setup Pool
+    const poolPda = getPoolPDA(poolId, program.programId);
+    const poolVault = getPoolVaultPDA(poolId, program.programId);
+    const protocolState = anchor.web3.PublicKey.findProgramAddressSync([Buffer.from("protocol_state")], program.programId)[0];
+
+    try {
+        await program.methods.initialize(500).accounts({ protocolState, admin: payer.publicKey }).rpc();
+    } catch {}
+
+    await program.methods.createPool(
+        poolId, "BTC", new anchor.BN(1_000_000), new anchor.BN(Math.floor(Date.now()/1000) + 10000), 100
+    ).accounts({
+        protocolState, pool: poolPda, poolVault, tokenMint: usdcMint, admin: payer.publicKey, 
+        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID, systemProgram: anchor.web3.SystemProgram.programId, rent: anchor.web3.SYSVAR_RENT_PUBKEY
+    }).rpc();
+  });
+
+  it("Places an Encrypted Bet", async () => {
+    const poolPda = getPoolPDA(poolId, program.programId);
+    const poolVault = getPoolVaultPDA(poolId, program.programId);
+    const encryptedBetPda = getBetPDA(poolPda, user1.publicKey, program.programId);
+
+    // FETCH CONTEXT (Uses manual derivation now)
+    const arcium = await getArciumContext(provider.connection, program.programId, "process_bet");
+    console.log("    > Using MXE:", arcium.mxeAccount.toBase58());
+    console.log("    > Comp Def:", arcium.compDefAccount.toBase58());
+
+    // Verify Comp Def exists (it should have been created in step 02)
+    const accInfo = await provider.connection.getAccountInfo(arcium.compDefAccount);
+    if (!accInfo) {
+      throw new Error(`Comp Def Account ${arcium.compDefAccount.toBase58()} does not exist. 02_arcium_setup failed to initialize it correctly.`);
+    }
+
+    const encryptedPrice = new Array(32).fill(1);
+    const pubKey = new Array(32).fill(2);
+    const nonce = new anchor.BN(12345);
+
+    try {
+        await program.methods
+        .placeEncryptedBet(
+            poolId,
+            encryptedPrice,
+            pubKey,
+            nonce
+        )
+        .accounts({
+            user: user1.publicKey,
+            pool: poolPda,
+            poolVault: poolVault,
+            tokenMint: usdcMint,
+            userTokenAccount: user1ATA,
+            encryptedBet: encryptedBetPda,
+            
+            mxeAccount: arcium.mxeAccount,
+            compDefAccount: arcium.compDefAccount, 
+            clusterAccount: arcium.clusterAccount,
+            mempoolAccount: arcium.mempoolAccount,         
+            executingPool: arcium.executingPool,           
+            computationAccount: arcium.computationAccount, 
+            
+            poolAccount: arciumFeePool,
+            clockAccount: arciumClock,
+            
+            tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            arciumProgram: arcium.arciumProgram,
+        })
+        .signers([user1])
+        .rpc();
+
+        const betAccount = await program.account.encryptedBet.fetch(encryptedBetPda);
+        assert.equal(betAccount.user.toBase58(), user1.publicKey.toBase58());
+        console.log("    > Bet Placed Successfully");
+    } catch (e) {
+        console.error("    > Bet Failed:", e);
+        throw e;
+    }
+  });
+});

@@ -1,0 +1,288 @@
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
+import { SwivPrivacy } from "../target/types/swiv_privacy";
+import {
+  createMint,
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
+import { getMXEAccAddress } from "@arcium-hq/client";
+import { BN } from "bn.js";
+import { assert } from "chai";
+
+// --- CONFIGURATION ---
+const POOL_ID = new BN(Math.floor(Math.random() * 1000000));
+const PREDICTION_PRICE = 50000;
+const ACTUAL_PRICE = 50000;
+const ENTRY_FEE = new BN(100_000_000); // 100 Tokens
+
+
+function crc32(str: string): number {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < str.length; i++) {
+    const byte = str.charCodeAt(i);
+    crc ^= byte;
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+    }
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+describe("swiv_privacy", () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+
+  const program = anchor.workspace.SwivPrivacy as Program<SwivPrivacy>;
+
+  console.log("Testing on Cluster:", provider.connection.rpcEndpoint);
+  console.log("Program ID:", program.programId.toString());
+
+  let mint: anchor.web3.PublicKey;
+  let userTokenAccount: anchor.web3.PublicKey;
+  let poolVault: anchor.web3.PublicKey;
+  
+  let protocolState: anchor.web3.PublicKey;
+  let poolPda: anchor.web3.PublicKey;
+  let encryptedBetPda: anchor.web3.PublicKey;
+
+  // --- ARCIUM PDA HELPERS ---
+ 
+
+  const getArciumAccounts = (ixName: string) => {
+    const mxePda = getMxePda();
+    const offset = crc32(ixName);
+    const offsetBuffer = new BN(offset).toArrayLike(Buffer, "le", 4);
+    const offsetBuffer64 = new BN(offset).toArrayLike(Buffer, "le", 8);
+
+    const [signPdaAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("sign_pda")],
+      program.programId
+    );
+    const [clusterAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("cluster"), mxePda.toBuffer()],
+      program.programId
+    );
+    const [mempoolAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("mempool"), mxePda.toBuffer()],
+      program.programId
+    );
+    const [executingPool] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("executing_pool"), mxePda.toBuffer()],
+      program.programId
+    );
+    const [compDefAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("comp_def"), offsetBuffer],
+      program.programId
+    );
+    const [computationAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("comp"), offsetBuffer64, mxePda.toBuffer()],
+      program.programId
+    );
+    const [poolAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("fee_pool"), mxePda.toBuffer()],
+      program.programId
+    );
+
+    return {
+      mxeAccount: mxePda,
+      signPdaAccount,
+      clusterAccount,
+      mempoolAccount,
+      executingPool,
+      compDefAccount,
+      computationAccount,
+      poolAccount,
+      clockAccount: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+    };
+  };
+
+  it("Debugs MXE Account", async () => {
+    const mxePda = getMxePda();
+    console.log("Using MXE Address:", mxePda.toString());
+    
+    const account = await provider.connection.getAccountInfo(mxePda);
+    if (!account) {
+      console.error("❌ MXE Account DOES NOT EXIST on this cluster!");
+      console.log("Ensure CLUSTER_OFFSET in test matches 'arcium deploy --cluster-offset X'");
+      // Fail the test if MXE is missing, as everything else will fail
+      assert.ok(account, "MXE Account not initialized");
+    } else {
+      console.log("✅ MXE Account exists. Data length:", account.data.length);
+    }
+  });
+
+  it("Initializes Protocol State", async () => {
+    [protocolState] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("protocol_state")],
+      program.programId
+    );
+
+    try {
+      await program.account.protocolState.fetch(protocolState);
+      console.log("Protocol already initialized.");
+    } catch (e) {
+      await program.methods
+        .initialize(500)
+        .accounts({
+          protocolState,
+          admin: provider.wallet.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      console.log("Protocol initialized.");
+    }
+  });
+
+  it("Initializes Arcium Computation Definitions", async () => {
+    const betAccounts = getArciumAccounts("process_bet");
+    try {
+      await program.methods
+        .initProcessBetCompDef()
+        .accounts({
+          payer: provider.wallet.publicKey,
+          mxeAccount: betAccounts.mxeAccount,
+          compDefAccount: betAccounts.compDefAccount,
+        })
+        .rpc();
+      console.log("Process Bet Comp Def Initialized");
+    } catch (e) {
+      console.log("Process Bet Comp Def likely already exists.");
+    }
+
+    const rewardAccounts = getArciumAccounts("calculate_reward_v2");
+    try {
+      await program.methods
+        .initCalculateRewardCompDef()
+        .accounts({
+          payer: provider.wallet.publicKey,
+          mxeAccount: rewardAccounts.mxeAccount,
+          compDefAccount: rewardAccounts.compDefAccount,
+        })
+        .rpc();
+      console.log("Reward Comp Def Initialized");
+    } catch (e) {
+      console.log("Reward Comp Def likely already exists.");
+    }
+  });
+
+  it("Sets up Token and Mints to User", async () => {
+    mint = await createMint(
+      provider.connection,
+      (provider.wallet as any).payer,
+      provider.wallet.publicKey,
+      null,
+      6
+    );
+
+    userTokenAccount = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      (provider.wallet as any).payer,
+      mint,
+      provider.wallet.publicKey
+    ).then((acc) => acc.address);
+
+    await mintTo(
+      provider.connection,
+      (provider.wallet as any).payer,
+      mint,
+      userTokenAccount,
+      provider.wallet.publicKey,
+      1000_000_000
+    );
+  });
+
+  it("Creates a Prediction Pool", async () => {
+    [poolPda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("pool"), POOL_ID.toArrayLike(Buffer, "le", 8)],
+      program.programId
+    );
+
+    [poolVault] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("pool_vault"), POOL_ID.toArrayLike(Buffer, "le", 8)],
+      program.programId
+    );
+
+    const now = Math.floor(Date.now() / 1000);
+    const targetTimestamp = new BN(now + 10);
+
+    await program.methods
+      .createPool(POOL_ID, "BTC/USD", ENTRY_FEE, targetTimestamp, 100)
+      .accounts({
+        protocolState,
+        pool: poolPda,
+        poolVault: poolVault,
+        tokenMint: mint,
+        admin: provider.wallet.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    console.log("Pool created.");
+  });
+
+  it("Places an Encrypted Bet", async () => {
+    [encryptedBetPda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("bet"), poolPda.toBuffer(), provider.wallet.publicKey.toBuffer()],
+      program.programId
+    );
+
+    const fakeCiphertext = Array(32).fill(0);
+    new BN(PREDICTION_PRICE).toArrayLike(Buffer, "le", 8).copy(Buffer.from(fakeCiphertext));
+    const fakePubkey = Array(32).fill(1);
+    const nonce = new BN(12345);
+
+    const arciumAccs = getArciumAccounts("process_bet");
+
+    await program.methods
+      .placeEncryptedBet(POOL_ID, fakeCiphertext, fakePubkey, nonce)
+      .accounts({
+        user: provider.wallet.publicKey,
+        pool: poolPda,
+        poolVault: poolVault,
+        tokenMint: mint,
+        userTokenAccount: userTokenAccount,
+        encryptedBet: encryptedBetPda,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
+        ...arciumAccs
+      })
+      .rpc();
+
+    console.log("Encrypted Bet placed successfully.");
+  });
+
+  it("Waits for Target Time and Finalizes Pool", async () => {
+    console.log("Waiting 12 seconds for pool to close...");
+    await new Promise((resolve) => setTimeout(resolve, 12000));
+
+    await program.methods
+      .finalizePool(new BN(ACTUAL_PRICE))
+      .accounts({
+        pool: poolPda,
+        admin: provider.wallet.publicKey,
+      })
+      .rpc();
+    
+    console.log("Pool finalized.");
+  });
+
+  it("Requests Reward Calculation", async () => {
+    const arciumAccs = getArciumAccounts("calculate_reward_v2");
+
+    await program.methods
+      .calculateReward(POOL_ID)
+      .accounts({
+        user: provider.wallet.publicKey,
+        protocolState,
+        pool: poolPda,
+        encryptedBet: encryptedBetPda,
+        systemProgram: anchor.web3.SystemProgram.programId,
+        ...arciumAccs
+      })
+      .rpc();
+    console.log("Reward calculation queued.");
+  });
+});

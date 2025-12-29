@@ -1,0 +1,67 @@
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
+import { SwivPrivacy } from "../target/types/swiv_privacy";
+import { findMxeAccount, getCompDefPdaAsync } from "./utils";
+
+describe("02_arcium_setup", () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+  const program = anchor.workspace.SwivPrivacy as Program<SwivPrivacy>;
+
+  it("Initializes Process Bet Comp Def", async () => {
+    // 1. Find the correct MXE Account (EuBNX...)
+    // This uses the deep search logic from utils to ensure we don't use the wrong default
+    const mxeAccount = await findMxeAccount(provider.connection, program.programId);
+    console.log("    > Using MXE Address:", mxeAccount.toBase58());
+
+    // 2. Derive the Comp Def PDA for "process_bet"
+    // This handles the string hashing and seed structure automatically
+    const compDef = await getCompDefPdaAsync(provider.connection, program.programId, "process_bet");
+
+    try {
+      await program.methods
+        .initProcessBetCompDef()
+        .accounts({
+          payer: provider.wallet.publicKey,
+          mxeAccount: mxeAccount,
+          compDefAccount: compDef,
+        })
+        .rpc();
+      console.log("    > Process Bet Comp Def Initialized");
+    } catch (e: any) {
+      // 3. Handle Devnet persistence errors
+      if (e.message.includes("already in use") || e.message.includes("0x0")) {
+         console.log("    > Process Bet Comp Def already active (Skipping).");
+      } else {
+         console.error("    > Error initializing Process Bet:", e);
+         throw e;
+      }
+    }
+  });
+
+  it("Initializes Calculate Reward Comp Def", async () => {
+    const mxeAccount = await findMxeAccount(provider.connection, program.programId);
+
+    // Derive PDA for "calculate_reward_v2"
+    const compDef = await getCompDefPdaAsync(provider.connection, program.programId, "calculate_reward_v2");
+
+    try {
+      await program.methods
+        .initCalculateRewardCompDef()
+        .accounts({
+          payer: provider.wallet.publicKey,
+          mxeAccount: mxeAccount,
+          compDefAccount: compDef,
+        })
+        .rpc();
+      console.log("    > Reward Comp Def Initialized");
+    } catch (e: any) {
+      if (e.message.includes("already in use") || e.message.includes("0x0")) {
+         console.log("    > Reward Comp Def already active (Skipping).");
+      } else {
+         console.error("    > Error initializing Reward Def:", e);
+         throw e;
+      }
+    }
+  });
+});

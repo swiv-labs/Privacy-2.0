@@ -1,0 +1,158 @@
+import * as anchor from "@coral-xyz/anchor";
+import { PublicKey } from "@solana/web3.js";
+import * as fs from "fs";
+import * as path from "path";
+// Correct Imports from the SDK
+import { 
+  getArciumProgramId,
+  getMXEAccAddress,
+  getClusterAccAddress,
+  getMempoolAccAddress,
+  getExecutingPoolAccAddress,
+  getCompDefAccAddress,
+  getComputationAccAddress,
+  getCompDefAccOffset // Helper to get the offset bytes from a name
+} from "@arcium-hq/client";
+
+// --- Constants ---
+export const PROGRAM_ID = new PublicKey("GVZ7596AK1vqiNDSL4pGoNVCSMruXVAWgVKxGVWNE9Pt");
+
+export const SEED_PROTOCOL_STATE = Buffer.from("protocol_state");
+export const SEED_POOL = Buffer.from("pool");
+export const SEED_POOL_VAULT = Buffer.from("pool_vault");
+export const SEED_BET = Buffer.from("bet");
+
+// --- Data Persistence ---
+const DATA_FILE = path.join(process.cwd(), "tests", "test_data.json");
+interface TestData {
+  poolId?: string;
+  mint?: string;
+}
+
+export const saveTestData = (data: TestData) => {
+  let current = {};
+  if (fs.existsSync(DATA_FILE)) {
+    try {
+      current = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    } catch { /* ignore */ }
+  }
+  const updated = { ...current, ...data };
+  fs.writeFileSync(DATA_FILE, JSON.stringify(updated));
+};
+
+export const loadTestData = (): TestData => {
+  if (!fs.existsSync(DATA_FILE)) {
+    return {};
+  }
+  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+};
+
+// --- Helper: Find MXE ---
+export const findMxeAccount = async (connection: anchor.web3.Connection, clientProgramId: PublicKey): Promise<PublicKey> => {
+    const arciumId = new PublicKey(getArciumProgramId());
+    
+    // 1. SDK Derivation
+    // The SDK derives the MXE address using the client program ID
+    const standardPda = getMXEAccAddress(clientProgramId);
+    
+    const info = await connection.getAccountInfo(standardPda);
+    if (info) return standardPda;
+
+    // 2. Deep Search Fallback
+    console.log("    > Standard MXE derivation failed. Searching network...");
+    const accounts = await connection.getProgramAccounts(arciumId, {
+        filters: [
+            {
+                memcmp: {
+                    offset: 21, 
+                    bytes: clientProgramId.toBase58()
+                }
+            }
+        ]
+    });
+    if (accounts.length === 0) {
+        throw new Error("MXE Account not found on Devnet. Did 'arcium deploy' finish?");
+    }
+    return accounts[0].pubkey;
+};
+
+// --- Arcium Context Helper ---
+export const getArciumContext = async (
+    connection: anchor.web3.Connection, 
+    clientProgramId: PublicKey, 
+    compDefName: string,
+    clusterId: number = 1 // Default to 1 if not specified, as SDK requires a number
+) => {
+    // 1. Get MXE Public Key
+    const mxeAccount = await findMxeAccount(connection, clientProgramId);
+    const arciumProgram = new PublicKey(getArciumProgramId());
+
+    // 2. Derive Cluster-based Accounts
+    // These require the Cluster ID (number), NOT the MXE Account
+    const clusterAccount = getClusterAccAddress(clusterId);
+    const mempoolAccount = getMempoolAccAddress(clusterId);
+    const executingPool = getExecutingPoolAccAddress(clusterId);
+    
+    // 3. Derive Computation Definition Offset
+    // The SDK returns 4 bytes (Uint8Array), we must convert to a number (u32)
+    const rawOffsetBytes = getCompDefAccOffset(compDefName);
+    const compDefOffset = Buffer.from(rawOffsetBytes).readUInt32LE(0);
+
+    // 4. Derive Comp Def Account
+    // Requires Client Program ID (PublicKey) + Offset (Number)
+    const compDefAccount = getCompDefAccAddress(clientProgramId, compDefOffset);
+
+    // 5. Derive Computation Account
+    // This requires Cluster ID (Number) + Computation ID (BN)
+    // We treat the compDefOffset (u32) as the Computation ID (u64) for testing consistency
+    const computationId = new anchor.BN(compDefOffset);
+    const computationAccount = getComputationAccAddress(clusterId, computationId);
+
+    return {
+        arciumProgram,
+        mxeAccount,
+        clusterAccount,
+        mempoolAccount,
+        executingPool,
+        compDefAccount,
+        computationAccount
+    };
+};
+
+// Helper for Setup (Comp Def Only)
+export const getCompDefPdaAsync = async (connection: anchor.web3.Connection, clientProgramId: PublicKey, name: string) => {
+    // Convert name to numeric offset
+    const rawOffsetBytes = getCompDefAccOffset(name);
+    const compDefOffset = Buffer.from(rawOffsetBytes).readUInt32LE(0);
+    
+    // Derive address using Client Program ID
+    return getCompDefAccAddress(clientProgramId, compDefOffset);
+}
+
+// --- Native PDAs ---
+export const getProtocolStatePDA = (programId: PublicKey) => {
+  return PublicKey.findProgramAddressSync([SEED_PROTOCOL_STATE], programId)[0];
+};
+
+export const getPoolPDA = (poolId: anchor.BN, programId: PublicKey) => {
+  return PublicKey.findProgramAddressSync(
+    [SEED_POOL, poolId.toArrayLike(Buffer, "le", 8)],
+    programId
+  )[0];
+};
+
+export const getPoolVaultPDA = (poolId: anchor.BN, programId: PublicKey) => {
+  return PublicKey.findProgramAddressSync(
+    [SEED_POOL_VAULT, poolId.toArrayLike(Buffer, "le", 8)],
+    programId
+  )[0];
+};
+
+export const getBetPDA = (pool: PublicKey, user: PublicKey, programId: PublicKey) => {
+  return PublicKey.findProgramAddressSync(
+    [SEED_BET, pool.toBuffer(), user.toBuffer()],
+    programId
+  )[0];
+};
+
+export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

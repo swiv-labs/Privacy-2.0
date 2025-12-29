@@ -1,0 +1,259 @@
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use arcium_anchor::prelude::*;
+
+use crate::{validate_callback_ixs, SignerAccount, ID, ID_CONST};
+
+use crate::{
+    comp_defs::COMP_DEF_OFFSET_PROCESS_BET,
+    errors::ErrorCode,
+    events::{BetProcessedEvent, EncryptedBetPlacedEvent},
+    state::{EncryptedBet, Pool, PoolStatus},
+};
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]
+pub struct ProcessBetResult {
+    pub is_valid: [u8; 32],
+}
+
+impl HasSize for ProcessBetResult {
+    const SIZE: usize = 32;
+}
+
+#[queue_computation_accounts("process_bet", user)]
+#[derive(Accounts)]
+#[instruction(pool_id: u64)]
+pub struct PlaceEncryptedBet<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"pool", pool_id.to_le_bytes().as_ref()],
+        bump = pool.bump,
+        constraint = pool.status == PoolStatus::Active @ ErrorCode::PoolNotActive,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [b"pool_vault", pool_id.to_le_bytes().as_ref()],
+        bump = pool.vault_bump,
+        token::mint = token_mint,
+        token::authority = pool,
+    )]
+    pub pool_vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(mut)]
+    pub token_mint: Box<Account<'info, token::Mint>>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.mint == token_mint.key(),
+        constraint = user_token_account.owner == user.key()
+    )]
+    pub user_token_account: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        init,
+        payer = user,
+        space = EncryptedBet::LEN,
+        seeds = [b"bet", pool.key().as_ref(), user.key().as_ref()],
+        bump
+    )]
+    pub encrypted_bet: Box<Account<'info, EncryptedBet>>,
+
+    #[account(
+        init_if_needed,
+        space = 9,
+        payer = user,
+        seeds = [&SIGN_PDA_SEED],
+        bump,
+        address = derive_sign_pda!(),
+    )]
+    pub sign_pda_account: Box<Account<'info, SignerAccount>>,
+
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: Checked by Arcium program
+    pub mempool_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: Checked by Arcium program
+    pub executing_pool: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_comp_pda!(COMP_DEF_OFFSET_PROCESS_BET as u64, mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: Checked by Arcium program
+    pub computation_account: UncheckedAccount<'info>,
+
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_PROCESS_BET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+
+    #[account(address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+pub fn place_encrypted_bet(
+    ctx: Context<PlaceEncryptedBet>,
+    pool_id: u64,
+    encrypted_predicted_price: [u8; 32],
+    pub_key: [u8; 32],
+    nonce: u128,
+) -> Result<()> {
+    let entry_fee = ctx.accounts.pool.entry_fee;
+    let user_key = ctx.accounts.user.key();
+    let pool_key = ctx.accounts.pool.key();
+    let clock = Clock::get()?;
+
+    {
+        let pool = &mut ctx.accounts.pool;
+        require!(
+            clock.unix_timestamp < pool.target_timestamp,
+            ErrorCode::PredictionTimePassed
+        );
+        require!(
+            pool.total_participants < pool.max_participants,
+            ErrorCode::PoolFull
+        );
+        pool.total_participants += 1;
+        pool.total_pool_amount += entry_fee;
+    }
+
+    let transfer_ctx = CpiContext::new(
+        ctx.accounts.token_program.to_account_info(),
+        Transfer {
+            from: ctx.accounts.user_token_account.to_account_info(),
+            to: ctx.accounts.pool_vault.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
+        },
+    );
+    token::transfer(transfer_ctx, entry_fee)?;
+
+    let bet_bump = ctx.bumps.encrypted_bet;
+    {
+        let bet = &mut ctx.accounts.encrypted_bet;
+        bet.user = user_key;
+        bet.pool = pool_key;
+        bet.encrypted_predicted_price = encrypted_predicted_price;
+        bet.pub_key = pub_key;
+        bet.nonce = nonce;
+        bet.stake_amount = entry_fee;
+        bet.claimed = false;
+        bet.bump = bet_bump;
+    }
+
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+    // --- FIX: Correct Order (Key -> Nonce -> Data) ---
+    // The error "Invalid argument EncryptedU64(1) for parameter PlaintextU128"
+    // means index 1 MUST be the Nonce (u128).
+    let args = ArgBuilder::new()
+        .x25519_pubkey(pub_key)                      // Index 0: PubKey
+        .plaintext_u128(nonce)                       // Index 1: Nonce (u128)
+        .encrypted_u64(encrypted_predicted_price)    // Index 2: Encrypted Data
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        COMP_DEF_OFFSET_PROCESS_BET as u64,
+        args,
+        None,
+        vec![ProcessBetCallback::callback_ix(
+            COMP_DEF_OFFSET_PROCESS_BET as u64,
+            &ctx.accounts.mxe_account,
+            &[],
+        )?],
+        1,
+        0,
+    )?;
+
+    emit!(EncryptedBetPlacedEvent {
+        pool_id,
+        user: user_key,
+        stake_amount: entry_fee,
+    });
+
+    Ok(())
+}
+
+#[callback_accounts("process_bet")]
+#[derive(Accounts)]
+pub struct ProcessBetCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_PROCESS_BET))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    /// CHECK: Checked by Arcium program
+    pub computation_account: UncheckedAccount<'info>,
+
+    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
+    /// CHECK: instructions_sysvar
+    pub instructions_sysvar: AccountInfo<'info>,
+}
+
+#[arcium_callback(encrypted_ix = "process_bet", auto_serialize = false)]
+pub fn process_bet_callback(
+    ctx: Context<ProcessBetCallback>,
+    output: SignedComputationOutputs<ProcessBetResult>,
+) -> Result<()> {
+    let o = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(res) => res,
+        Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+    };
+
+    let result_struct = SharedEncryptedStruct {
+        ciphertexts: [o.is_valid],
+        nonce: 0,
+        encryption_key: [0u8; 32],
+    };
+
+    emit!(BetProcessedEvent {
+        success: result_struct,
+    });
+
+    Ok(())
+}
+
+#[init_computation_definition_accounts("process_bet", payer)]
+#[derive(Accounts)]
+pub struct InitProcessBetCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut)]
+    /// CHECK: Checked by Arcium program
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn init_process_bet_comp_def(ctx: Context<InitProcessBetCompDef>) -> Result<()> {
+    init_comp_def(ctx.accounts, None, None)?;
+    Ok(())
+}

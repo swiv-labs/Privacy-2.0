@@ -1,0 +1,85 @@
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
+import { SwivPrivacy } from "../target/types/swiv_privacy";
+import { getProtocolStatePDA, getPoolPDA, getPoolVaultPDA, saveTestData } from "./utils";
+import { createMint } from "@solana/spl-token";
+
+describe("01_admin", () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+  const program = anchor.workspace.SwivPrivacy as Program<SwivPrivacy>;
+  const admin = provider.wallet;
+
+  const protocolState = getProtocolStatePDA(program.programId);
+  const poolId = new anchor.BN(Date.now()); 
+  
+  let usdcMint: anchor.web3.PublicKey;
+
+  before(async () => {
+    try {
+      usdcMint = await createMint(
+        provider.connection,
+        (admin as any).payer,
+        admin.publicKey,
+        null,
+        6
+      );
+      
+      // SAVE ID FOR LATER
+      saveTestData({ 
+        poolId: poolId.toString(),
+        mint: usdcMint.toString()
+      });
+      
+    } catch (e) {
+      console.error("Failed to create mint:", e);
+    }
+  });
+
+  it("Initializes the protocol (or skips if active)", async () => {
+    const feeBps = 500;
+    const accountInfo = await provider.connection.getAccountInfo(protocolState);
+    if (accountInfo) return;
+
+    await program.methods
+      .initialize(feeBps)
+      .accountsPartial({
+        protocolState: protocolState,
+        admin: admin.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+  });
+
+  it("Creates a Prediction Pool", async () => {
+    const entryFee = new anchor.BN(1_000_000); 
+    const now = Math.floor(Date.now() / 1000);
+    const targetTime = new anchor.BN(now + 10); 
+    const maxParticipants = 100;
+
+    const poolPda = getPoolPDA(poolId, program.programId);
+    const poolVault = getPoolVaultPDA(poolId, program.programId);
+
+    await program.methods
+      .createPool(
+        poolId,
+        "BTC",
+        entryFee,
+        targetTime,
+        maxParticipants
+      )
+      .accountsPartial({
+        protocolState: protocolState,
+        pool: poolPda,
+        poolVault: poolVault,
+        tokenMint: usdcMint,
+        admin: admin.publicKey,
+        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      })
+      .rpc();
+    
+    console.log(`    > Created Pool: ${poolId.toString()}`);
+  });
+});

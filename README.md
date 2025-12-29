@@ -1,247 +1,121 @@
-# Swiv with Arcium Integration
+# Structure of this project
 
-Privacy-preserving prediction market on Solana using Arcium's Multi-Party Computation (MPC) for confidential predictions.
+This project is structured pretty similarly to how a regular Solana Anchor project is structured. The main difference lies in there being two places to write code here:
 
-## Overview
+- The `programs` dir like usual Anchor programs
+- The `encrypted-ixs` dir for confidential computing instructions
 
-This integration adds privacy to your prediction market by encrypting users' predicted prices and stake amounts. The encrypted data is processed by Arcium's MPC network, ensuring predictions remain private until pool finalization.
-
-## Key Privacy Features
-
-- ✅ **Private Predictions**: User's predicted prices are encrypted and never revealed publicly
-- ✅ **Confidential Computation**: Reward calculations happen on encrypted data via MPC
-- ✅ **Fair Distribution**: Rewards are calculated without revealing individual predictions
-- ✅ **Zero Knowledge**: Pool participants can't see others' predictions until finalized
-
-## Architecture Changes
-
-### Original Flow
-1. User places bet → predicted_price stored in plaintext
-2. Pool finalizes → everyone can see all predictions
-3. Rewards calculated → transparent computation
-
-### New Arcium-Enhanced Flow
-1. User encrypts predicted_price client-side
-2. Encrypted data sent to program → stored as ciphertext
-3. Arcium MPC nodes process encrypted data
-4. Pool finalizes → predictions remain private
-5. Rewards calculated via MPC → results returned encrypted
-6. Users claim rewards without revealing predictions
-
-## Project Structure
-
-```
-swiv_privacy/
-├── Arcium.toml                    # Arcium configuration
-├── Cargo.toml                     # Dependencies with Arcium libs
-├── programs/
-│   └── swiv_privacy/
-│       └── src/
-│           └── lib.rs             # Main program with Arcium integration
-├── encrypted-ixs/                 # Confidential instructions
-│   └── lib.rs                    # MPC computation logic for bet processing and reward calculation
-└── client/
-    └── encryption.ts              # TypeScript encryption helpers
-```
-
-## Installation & Setup
-
-### 1. Install Arcium CLI
-
-```bash
-# Install Arcium CLI (wrapper over Anchor CLI)
-npm install -g @arcium/cli
-
-# Or using cargo
-cargo install arcium-cli
-```
-
-### 2. Initialize Project
-
-```bash
-# If starting fresh
-arcium init swiv_privacy
-cd swiv_privacy
-
-# If integrating into existing project, replace:
-# - Replace #[program] with #[arcium_program]
-# - Add Arcium dependencies to Cargo.toml
-# - Add encrypted-ixs/ directory
-```
-
-### 3. Update Dependencies
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-anchor-lang = "0.32.1"
-anchor-spl = "0.32.1"
-arcium-macros = "0.4.0"
-arcium-client = "0.4.0"
-arcis-imports = "0.4.0"
-```
-
-### 4. Build the Program
-
-```bash
-# Build with Arcium
-arcium build
-
-# This compiles both:
-# - Your main Solana program
-# - Encrypted instructions for MPC
-```
-
-### 5. Deploy to Testnet
-
-```bash
-# Deploy program
-arcium deploy --provider.cluster testnet
-
-# Initialize protocol
-arcium run initialize --provider.cluster testnet
-```
-
-## Usage
-
-### Client-Side Integration
-
-```typescript
-import { ArciumClient } from '@arcium/client';
-import { swiv_privacyEncryption } from './client/encryption';
-
-// Initialize Arcium client
-const arciumClient = new ArciumClient({
-  network: 'testnet',
-});
-
-const encryption = new swiv_privacyEncryption(arciumClient);
-
-// 1. Initialize computation definition (one-time setup)
-const initCompDefTx = await encryption.initializeCompDef(
-  program,
-  payerKeypair
-);
-await provider.sendAndConfirm(new Transaction().add(initCompDefTx));
-
-// 2. Place encrypted bet
-const predictedPrice = 50000; // User's private prediction
-const betIx = await encryption.createEncryptedBetInstruction(
-  program,
-  poolId,
-  predictedPrice,
-  userKeypair,
-  poolAccount,
-  poolVaultAccount,
-  userTokenAccount,
-  compDefAccount
-);
-
-await provider.sendAndConfirm(new Transaction().add(betIx));
-
-// 3. Calculate rewards (after pool finalization)
-const rewardIx = await encryption.calculateRewardInstruction(
-  program,
-  poolAccount,
-  userKeypair
-);
-
-await provider.sendAndConfirm(new Transaction().add(rewardIx));
-```
-
-### Program Instructions
-
-#### Initialize (Unchanged)
-```rust
-pub fn initialize(ctx: Context<Initialize>, protocol_fee_bps: u16)
-```
-
-#### Create Pool (Unchanged)
-```rust
-pub fn create_pool(
-    ctx: Context<CreatePool>,
-    pool_id: u64,
-    asset_symbol: String,
-    entry_fee: u64,
-    target_timestamp: i64,
-    max_participants: u32,
-)
-```
-
-#### Place Encrypted Bet (New)
-```rust
-pub fn place_encrypted_bet(
-    ctx: Context<PlaceEncryptedBet>,
-    encrypted_bet_data: [u8; 32],  // Encrypted predicted_price
-    public_key: [u8; 32],          // User's encryption key
-    nonce: [u8; 16],               // Encryption nonce
-)
-```
-
-#### Finalize Pool (Unchanged)
-```rust
-pub fn finalize_pool(ctx: Context<FinalizePool>, actual_price: u64)
-```
-
-#### Calculate Reward (New)
-```rust
-pub fn calculate_reward(ctx: Context<CalculateReward>)
-```
-
-## Key Components
-
-### 1. Encrypted Instructions (`encrypted-ixs/bet_processing.rs`)
-
-These run in Arcium's MPC environment:
-
-- **`process_encrypted_bet`**: Validates encrypted predictions
-- **`calculate_encrypted_reward`**: Computes and calculates rewards on encrypted data
-
-### 2. Modified Account Structure
+When working with plaintext data, we can edit it inside our program as normal. When working with confidential data though, state transitions take place off-chain using the Arcium network as a co-processor. For this, we then always need two instructions in our program: one that gets called to initialize a confidential computation, and one that gets called when the computation is done and supplies the resulting data. Additionally, since the types and operations in a Solana program and in a confidential computing environment are a bit different, we define the operations themselves in the `encrypted-ixs` dir using our Rust-based framework called Arcis. To link all of this together, we provide a few macros that take care of ensuring the correct accounts and data are passed for the specific initialization and callback functions:
 
 ```rust
-#[account]
-pub struct EncryptedBet {
-    pub user: Pubkey,
-    pub pool: Pubkey,
-    pub encrypted_data: [u8; 32],      // Ciphertext
-    pub user_public_key: [u8; 32],     // For decryption
-    pub nonce: [u8; 16],               // Encryption nonce
-    pub stake_amount: u64,             // Public (for pool tracking)
-    pub claimed: bool,
-    pub bump: u8,
+// encrypted-ixs/add_together.rs
+
+use arcis_imports::*;
+
+#[encrypted]
+mod circuits {
+    use arcis_imports::*;
+
+    pub struct InputValues {
+        v1: u8,
+        v2: u8,
+    }
+
+    #[instruction]
+    pub fn add_together(input_ctxt: Enc<Shared, InputValues>) -> Enc<Shared, u16> {
+        let input = input_ctxt.to_arcis();
+        let sum = input.v1 as u16 + input.v2 as u16;
+        input_ctxt.owner.from_arcis(sum)
+    }
+}
+
+// programs/my_program/src/lib.rs
+
+use anchor_lang::prelude::*;
+use arcium_anchor::prelude::*;
+
+declare_id!("<some ID>");
+
+#[arcium_program]
+pub mod my_program {
+    use super::*;
+
+    pub fn init_add_together_comp_def(ctx: Context<InitAddTogetherCompDef>) -> Result<()> {
+        init_comp_def(ctx.accounts, None, None)?;
+        Ok(())
+    }
+
+    pub fn add_together(
+        ctx: Context<AddTogether>,
+        computation_offset: u64,
+        ciphertext_0: [u8; 32],
+        ciphertext_1: [u8; 32],
+        pubkey: [u8; 32],
+        nonce: u128,
+    ) -> Result<()> {
+        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        let args = ArgBuilder::new()
+            .x25519_pubkey(pubkey)
+            .plaintext_u128(nonce)
+            .encrypted_u8(ciphertext_0)
+            .encrypted_u8(ciphertext_1)
+            .build();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            None,
+            vec![AddTogetherCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[]
+            )?],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
+    #[arcium_callback(encrypted_ix = "add_together")]
+    pub fn add_together_callback(
+        ctx: Context<AddTogetherCallback>,
+        output: SignedComputationOutputs<AddTogetherOutput>,
+    ) -> Result<()> {
+        let o = match output.verify_output(&ctx.accounts.cluster_account, &ctx.accounts.computation_account) {
+            Ok(AddTogetherOutput { field_0 }) => field_0,
+            Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+        };
+
+        emit!(SumEvent {
+            sum: o.ciphertexts[0],
+            nonce: o.nonce.to_le_bytes(),
+        });
+        Ok(())
+    }
+}
+
+#[queue_computation_accounts("add_together", payer)]
+#[derive(Accounts)]
+#[instruction(computation_offset: u64)]
+pub struct AddTogether<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    // ... other required accounts
+}
+
+#[callback_accounts("add_together")]
+#[derive(Accounts)]
+pub struct AddTogetherCallback<'info> {
+    // ... required accounts
+    pub some_extra_acc: AccountInfo<'info>,
+}
+
+#[init_computation_definition_accounts("add_together", payer)]
+#[derive(Accounts)]
+pub struct InitAddTogetherCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    // ... other required accounts
 }
 ```
-
-### 3. Computation Flow
-
-```
-Client                  Solana Program              Arcium MPC Network
-  |                           |                            |
-  |-- Encrypt Data -------->  |                            |
-  |                           |                            |
-  |-- Place Bet ----------->  |                            |
-  |                           |-- Submit Computation ---->  |
-  |                           |                            |
-  |                           |                     [Process Encrypted]
-  |                           |                            |
-  |                           | <---- Return Result ----   |
-  |                           |                            |
-  |                      [Callback]                        |
-  | <-- Confirmation ----    |                            |
-```
-
-## Testing
-
-```bash
-# Run tests
-arcium test
-```
-
-## Benefits
-
-1. **Privacy**: True prediction privacy until finalization
-2. **Fair Competition**: No front-running based on visible predictions
-3. **Regulatory Compliance**: Better privacy for sensitive financial data
-4. **User Trust**: Users can verify MPC computation integrity

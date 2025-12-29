@@ -1,0 +1,244 @@
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use arcium_anchor::prelude::*;
+
+use crate::{ID, ID_CONST, SignerAccount, validate_callback_ixs};
+
+use crate::{
+    comp_defs::COMP_DEF_OFFSET_CALCULATE_REWARD,
+    errors::ErrorCode,
+    events::RewardClaimedEvent,
+    state::{EncryptedBet, Pool, PoolStatus, ProtocolState},
+};
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]
+pub struct RewardResult {
+    pub reward_amount: u64,
+    pub accuracy_bps: u64,
+}
+
+impl HasSize for RewardResult {
+    const SIZE: usize = 16;
+}
+
+#[queue_computation_accounts("calculate_reward_v2", user)]
+#[derive(Accounts)]
+#[instruction(pool_id: u64)]
+pub struct CalculateReward<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        seeds = [b"protocol_state"],
+        bump = protocol_state.bump
+    )]
+    pub protocol_state: Box<Account<'info, ProtocolState>>,
+
+    #[account(
+        mut,
+        seeds = [b"pool", pool_id.to_le_bytes().as_ref()],
+        bump = pool.bump,
+        constraint = pool.status == PoolStatus::Finalized @ ErrorCode::PoolNotFinalized,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [b"bet", pool.key().as_ref(), user.key().as_ref()],
+        bump = encrypted_bet.bump,
+        constraint = encrypted_bet.user == user.key() @ ErrorCode::Unauthorized,
+        constraint = !encrypted_bet.claimed @ ErrorCode::AlreadyClaimed,
+    )]
+    pub encrypted_bet: Box<Account<'info, EncryptedBet>>,
+
+    // --- Arcium Accounts (Boxed) ---
+    #[account(
+        init_if_needed,
+        space = 9,
+        payer = user,
+        seeds = [&SIGN_PDA_SEED],
+        bump,
+        address = derive_sign_pda!(),
+    )]
+    pub sign_pda_account: Box<Account<'info, SignerAccount>>,
+
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut, address = derive_mempool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: Checked by Arcium program
+    pub mempool_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_execpool_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: Checked by Arcium program
+    pub executing_pool: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_comp_pda!(COMP_DEF_OFFSET_CALCULATE_REWARD as u64, mxe_account, ErrorCode::ClusterNotSet))]
+    /// CHECK: Checked by Arcium program
+    pub computation_account: UncheckedAccount<'info>,
+
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CALCULATE_REWARD))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    #[account(mut, address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+
+    #[account(address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
+    pub clock_account: Account<'info, ClockAccount>,
+    
+    pub system_program: Program<'info, System>,
+    pub arcium_program: Program<'info, Arcium>,
+}
+
+pub fn calculate_reward(ctx: Context<CalculateReward>, _pool_id: u64) -> Result<()> {
+    ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+
+    // --- FIX: Correct Order & Type ---
+    // 1. PubKey -> 2. Nonce (u128) -> 3. Encrypted Data
+    let args = ArgBuilder::new()
+        .x25519_pubkey(ctx.accounts.encrypted_bet.pub_key)
+        .plaintext_u128(ctx.accounts.encrypted_bet.nonce) // Passed as u128, NOT u64
+        .encrypted_u64(ctx.accounts.encrypted_bet.encrypted_predicted_price)
+        // Then remaining plaintext arguments...
+        .plaintext_u64(ctx.accounts.pool.actual_price)
+        .plaintext_u64(ctx.accounts.pool.total_pool_amount)
+        .plaintext_u16(ctx.accounts.protocol_state.protocol_fee_bps)
+        .build();
+
+    queue_computation(
+        ctx.accounts,
+        COMP_DEF_OFFSET_CALCULATE_REWARD as u64,
+        args,
+        None,
+        vec![CalculateRewardV2Callback::callback_ix(
+            COMP_DEF_OFFSET_CALCULATE_REWARD as u64,
+            &ctx.accounts.mxe_account,
+            &[],
+        )?],
+        1, 
+        0, 
+    )?;
+
+    Ok(())
+}
+
+#[callback_accounts("calculate_reward_v2")]
+#[derive(Accounts)]
+pub struct CalculateRewardV2Callback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+    
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_CALCULATE_REWARD))]
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    #[account(address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    /// CHECK: Checked by Arcium program
+    pub computation_account: UncheckedAccount<'info>,
+
+    #[account(address = derive_cluster_pda!(mxe_account, ErrorCode::ClusterNotSet))]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+    
+    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
+    /// CHECK: instructions_sysvar
+    pub instructions_sysvar: AccountInfo<'info>,
+
+    #[account(mut)]
+    pub pool: Box<Account<'info, Pool>>, 
+    #[account(
+        mut,
+        seeds = [b"bet", pool.key().as_ref(), encrypted_bet.user.as_ref()],
+        bump = encrypted_bet.bump,
+    )]
+    pub encrypted_bet: Box<Account<'info, EncryptedBet>>, 
+    
+    #[account(
+        mut,
+        seeds = [b"pool_vault", pool.pool_id.to_le_bytes().as_ref()],
+        bump = pool.vault_bump,
+    )]
+    pub pool_vault: Box<Account<'info, TokenAccount>>, 
+    
+    #[account(
+        mut,
+        constraint = user_token_account.owner == encrypted_bet.user
+    )]
+    pub user_token_account: Box<Account<'info, TokenAccount>>, 
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[arcium_callback(encrypted_ix = "calculate_reward_v2", auto_serialize = false)]
+pub fn calculate_reward_v2_callback(
+    ctx: Context<CalculateRewardV2Callback>,
+    output: SignedComputationOutputs<RewardResult>,
+) -> Result<()> {
+    let result = match output.verify_output(
+        &ctx.accounts.cluster_account,
+        &ctx.accounts.computation_account,
+    ) {
+        Ok(val) => val,
+        Err(_) => return Err(ErrorCode::AbortedComputation.into()),
+    };
+
+    let bet = &mut ctx.accounts.encrypted_bet;
+    require!(!bet.claimed, ErrorCode::AlreadyClaimed);
+
+    bet.claimed = true;
+
+    if result.reward_amount > 0 {
+        let pool_id_bytes = ctx.accounts.pool.pool_id.to_le_bytes();
+        let seeds = &[
+            b"pool_vault",
+            pool_id_bytes.as_ref(),
+            &[ctx.accounts.pool.vault_bump],
+        ];
+        let signer = &[&seeds[..]];
+
+        let transfer_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.pool_vault.to_account_info(),
+                to: ctx.accounts.user_token_account.to_account_info(),
+                authority: ctx.accounts.pool_vault.to_account_info(),
+            },
+            signer,
+        );
+
+        token::transfer(transfer_ctx, result.reward_amount)?;
+    }
+
+    emit!(RewardClaimedEvent {
+        pool_id: ctx.accounts.pool.pool_id,
+        user: bet.user,
+        reward_amount: result.reward_amount,
+        accuracy_bps: result.accuracy_bps,
+    });
+
+    Ok(())
+}
+
+#[init_computation_definition_accounts("calculate_reward_v2", payer)]
+#[derive(Accounts)]
+pub struct InitCalculateRewardCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>, 
+
+    #[account(mut)]
+    /// CHECK: Checked by Arcium program
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn init_calculate_reward_comp_def(ctx: Context<InitCalculateRewardCompDef>) -> Result<()> {
+    init_comp_def(ctx.accounts, None, None)?;
+    Ok(())
+}
